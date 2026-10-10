@@ -1028,6 +1028,7 @@ static void print_info (char *name) {
     printf("          v = 2 or 3 (default 3) optionally selects video player version\n");
     printf("-lang ... Ranked HLS language preferences (\"fr:pt-BR:..\");\" \" = none\n");
     printf("-slang ...Ranked HLS subtitle language preferences (overrides -lang)\n");
+    printf("-slang none  Do not show HLS subtitles\n");
     printf("-custom s Restrict HLS resolutions by codec (useful on low-power hosts)\n");
     printf("-custom   Omit input \"profile string\" s to show its required format\n");
     printf("-rpi n    Set pre-selected HLS \"profile strings\" on R PI by model code n\n");
@@ -2136,6 +2137,11 @@ static void parse_arguments (int argc, char *argv[]) {
                 lang_subtitles = argv[++i];
             }
             lang_subtitles.erase(std::remove(lang_subtitles.begin(), lang_subtitles.end(), ' '), lang_subtitles.end()); 
+            if (lang_subtitles == "none") {
+                /* do not render HLS subtitles at all */
+                lang_subtitles.erase();
+                video_renderer_set_hls_subtitles(false);
+            }
         } else if (arg == "-h265") {
             h265_support = true;
         } else if (arg == "-nofreeze") {

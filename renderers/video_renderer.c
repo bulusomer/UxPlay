@@ -68,6 +68,7 @@ static bool use_x11 = false;
 #endif
 static bool logger_debug = false;
 static gint64 hls_requested_start_position = 0;
+static bool hls_subtitles = true;
 static gint64 hls_seek_start = 0;
 static gint64 hls_seek_end = 0;
 static gint64 hls_duration = 0;
@@ -84,7 +85,7 @@ static int type_jpeg = 0;
 typedef enum {
   //GST_PLAY_FLAG_VIDEO         = (1 << 0),
   //GST_PLAY_FLAG_AUDIO         = (1 << 1),
-  //GST_PLAY_FLAG_TEXT          = (1 << 2),
+  GST_PLAY_FLAG_TEXT          = (1 << 2),
   //GST_PLAY_FLAG_VIS           = (1 << 3),
   //GST_PLAY_FLAG_SOFT_VOLUME   = (1 << 4),
   //GST_PLAY_FLAG_NATIVE_AUDIO  = (1 << 5),
@@ -201,6 +202,10 @@ void video_renderer_size(float *f_width_source, float *f_height_source, float *f
     width = (unsigned short) *f_width;
     height = (unsigned short) *f_height;
     logger_log(logger, LOGGER_DEBUG, "begin video stream wxh = %dx%d; source %dx%d", width, height, width_source, height_source);
+}
+
+void video_renderer_set_hls_subtitles(bool enabled) {
+    hls_subtitles = enabled;
 }
 
 GstElement *make_video_sink(const char *videosink, const char *videosink_options) {
@@ -363,6 +368,9 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
             g_object_get(renderer_type[i]->pipeline, "flags", &flags, NULL);
             flags |= GST_PLAY_FLAG_DOWNLOAD;
             flags |= GST_PLAY_FLAG_BUFFERING;    // set by default in playbin3, but not in playbin2; is it needed?
+            if (!hls_subtitles) {
+                flags &= ~GST_PLAY_FLAG_TEXT;
+            }
             g_object_set(renderer_type[i]->pipeline, "flags", flags, NULL);
             g_object_set(renderer_type[i]->pipeline, "volume", hls_volume_level, NULL);
             //g_object_set (G_OBJECT (renderer_type[i]->pipeline), "uri", uri, NULL);

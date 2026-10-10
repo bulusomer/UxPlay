@@ -60,6 +60,7 @@ void video_renderer_hls_ready ();
 void video_renderer_seek(float position);
 void video_renderer_set_start(float position);
 void video_renderer_resume ();
+void video_renderer_set_hls_subtitles(bool enabled);
 int video_renderer_cycle ();
 bool video_renderer_is_paused();
 bool video_renderer_eos_watch();
