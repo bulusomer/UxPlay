@@ -219,6 +219,7 @@ static std::string mux_filename = "recording";
 static bool raspberry_pi_hls_support = false;
 static std::string custom_profile_string = "";
 static std::string hls_ext_socket_path = "";
+static bool hls_ext_all_languages = false;
 static std::string client_device_name = "";      /* name of the last client that connected */
 static std::string client_device_model = "";
 static pthread_mutex_t client_device_name_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -1043,6 +1044,7 @@ static void print_info (char *name) {
     printf("-slang none  Do not show HLS subtitles\n");
     printf("-hlsext path Hand HLS/URL video to an external player listening on Unix\n");
     printf("             socket \"path\" instead of playing it (mirroring is unchanged)\n");
+    printf("-hlsextlang  With -hlsext: keep all audio and subtitle languages\n");
     printf("-custom s Restrict HLS resolutions by codec (useful on low-power hosts)\n");
     printf("-custom   Omit input \"profile string\" s to show its required format\n");
     printf("-rpi n    Set pre-selected HLS \"profile strings\" on R PI by model code n\n");
@@ -2152,6 +2154,9 @@ static void parse_arguments (int argc, char *argv[]) {
                 lang_requested = argv[++i];
             }
             lang_requested.erase(std::remove(lang_requested.begin(), lang_requested.end(), ' '), lang_requested.end());
+        } else if (arg == "-hlsextlang") {
+            /* with -hlsext: hand every audio/subtitle language to the external player */
+            hls_ext_all_languages = true;
         } else if (arg == "-slang") {
             lang_subtitles.erase();
             if (i < argc - 1 && *argv[i+1] != '-') {
@@ -3510,6 +3515,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3], 
     if (pin_pw == 1) raop_set_plist(raop, "pin", (int) pin);
     if (hls_support) raop_set_plist(raop, "hls", 1);
     if (!hls_ext_socket_path.empty()) raop_set_plist(raop, "hls_single_variant", 1);
+    if (!hls_ext_socket_path.empty() && hls_ext_all_languages) raop_set_plist(raop, "hls_all_languages", 1);
 
     /* network port selection (ports listed as "0" will be dynamically assigned) */
     raop_set_tcp_ports(raop, tcp);

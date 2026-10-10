@@ -88,6 +88,7 @@ struct raop_s {
     /* activate support for HLS live streaming */
     bool hls_support;
     bool hls_single_variant;   /* hand a single HLS variant to an external player */
+    bool hls_all_languages;    /* keep every audio/subtitle language for the external player */
     bool hls_pending;
   
     /* used in digest authentication */
@@ -769,6 +770,8 @@ int raop_set_plist(raop_t *raop, const char *plist_item, const int value) {
         raop->hls_support = (value > 0 ? true : false);
     } else if (strcmp(plist_item, "hls_single_variant") == 0) {
         raop->hls_single_variant = (value > 0 ? true : false);
+    } else if (strcmp(plist_item, "hls_all_languages") == 0) {
+        raop->hls_all_languages = (value > 0 ? true : false);
     } else {
         retval = -1;
     }	  
