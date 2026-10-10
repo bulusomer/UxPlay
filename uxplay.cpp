@@ -205,6 +205,10 @@ static uint32_t rtptime_coverart_expired = 0;
 static std::string artist;
 static std::string track_title;
 static std::string track_album;
+/* track fields for the -hlsext external player, kept whether or not cover art is rendered */
+static std::string hls_ext_track_title;
+static std::string hls_ext_track_artist;
+static std::string hls_ext_track_album;
 static std::string coverart_artist;
 static std::string ble_filename = "";
 static std::string rtp_pipeline = "";
@@ -216,7 +220,10 @@ static bool raspberry_pi_hls_support = false;
 static std::string custom_profile_string = "";
 static std::string hls_ext_socket_path = "";
 static std::string client_device_name = "";      /* name of the last client that connected */
+static std::string client_device_model = "";
 static pthread_mutex_t client_device_name_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void hls_ext_notify(const std::string &message, bool connect_if_needed);
+static void hls_ext_notify_audio_progress(uint32_t start, uint32_t curr, uint32_t end);
 
 //Support for D-Bus-based screensaver inhibition (org.freedesktop.ScreenSaver) 
 static unsigned int scrsv = 0;
@@ -686,6 +693,7 @@ static gboolean progress_callback (gpointer loop) {
     if (monitor_progress) {
         if ((rtptime_start || rtptime_end) && rtptime != rtptime_prev ) { //only display if rtptime has changed since last call
             display_progress(rtptime_start, rtptime, rtptime_end);
+            hls_ext_notify_audio_progress(rtptime_start, rtptime, rtptime_end);
             rtptime_prev = rtptime;
         }
         if (render_coverart && coverart_artist == "_expired_" && rtptime - rtptime_coverart_expired > 44100 * 5) {
@@ -2192,6 +2200,7 @@ static void process_metadata(int count, const char *dmap_tag, const unsigned cha
                 break;
             case 'l':
                 metadata_text->append("Album: ");  /*asal*/
+                hls_ext_track_album.assign((const char *) metadata, datalen);
                 if (render_coverart) {
                     track_album.erase();
                     track_album.append(metadata, metadata + datalen);
@@ -2199,6 +2208,7 @@ static void process_metadata(int count, const char *dmap_tag, const unsigned cha
                 break;
             case 'r':
                 metadata_text->append("Artist: ");  /*asar*/
+                hls_ext_track_artist.assign((const char *) metadata, datalen);
                 if (render_coverart) {
                     artist.erase();
                     artist.append(metadata, metadata + datalen);
@@ -2279,6 +2289,7 @@ static void process_metadata(int count, const char *dmap_tag, const unsigned cha
     } else if (strcmp (dmap_tag, "minm") == 0) {
         dmap_type = 9;
         metadata_text->append("Title: ");
+        hls_ext_track_title.assign((const char *) metadata, datalen);
         if (render_coverart) {
             track_title.erase();
             track_title.append(metadata, metadata + datalen);
@@ -2693,6 +2704,7 @@ extern "C" void report_client_request(void *cls, char *deviceid, char * model, c
     LOGI("connection request from %s (%s) with deviceID = %s\n", name, model, deviceid);
     pthread_mutex_lock(&client_device_name_mutex);
     client_device_name = name ? name : "";
+    client_device_model = model ? model : "";
     pthread_mutex_unlock(&client_device_name_mutex);
     if (restrict_clients) {
         *admit = check_client(deviceid);
@@ -2905,6 +2917,13 @@ extern "C" void video_report_size(void *cls, float *width_source, float *height_
 }
 
 extern "C" void audio_set_coverart(void *cls, const void *buffer, int buflen) {
+    if (buffer && buflen > 0 && !hls_ext_socket_path.empty()) {
+        /* the external player shows the cover art from a file next to its socket */
+        std::string path = hls_ext_socket_path + ".coverart";
+        if (write_coverart(path.c_str(), buffer, buflen) == (size_t) buflen) {
+            hls_ext_notify("audio-coverart " + path, true);
+        }
+    }
     if (buffer && coverart_filename.length()) {
         write_coverart(coverart_filename.c_str(), buffer, buflen);
         LOGI("coverart size %d written to %s", buflen,  coverart_filename.c_str());
@@ -2916,6 +2935,8 @@ extern "C" void audio_set_coverart(void *cls, const void *buffer, int buflen) {
 }
 
 extern "C" void audio_stop_coverart_rendering(void *cls) {
+    /* called when the client tears down its audio stream */
+    hls_ext_notify("audio-stop", false);
     if (render_coverart) {
         video_reset(cls, RESET_TYPE_RTP_SHUTDOWN);
     }
@@ -2926,6 +2947,7 @@ extern "C" void audio_set_progress(void *cls, uint32_t *start, uint32_t *curr, u
     rtptime = *curr;
     rtptime_end = *end;
     display_progress(rtptime_start, rtptime, rtptime_end);
+    hls_ext_notify_audio_progress(rtptime_start, rtptime, rtptime_end);
 }
 
 extern "C" void audio_set_metadata(void *cls, const void *buffer, int buflen) {
@@ -2952,6 +2974,9 @@ extern "C" void audio_set_metadata(void *cls, const void *buffer, int buflen) {
         return;
     }
     std::string metadata_text = "";
+    hls_ext_track_title.erase();
+    hls_ext_track_artist.erase();
+    hls_ext_track_album.erase();
     while (buflen >= 8) {
         count++;
         if (parse_dmap_header(metadata, dmap_tag, &datalen)) {
@@ -2970,6 +2995,21 @@ extern "C" void audio_set_metadata(void *cls, const void *buffer, int buflen) {
     }
     if (buflen != 0) {
         LOGE("%d bytes of metadata were not processed", buflen);
+    }
+    if (!hls_ext_socket_path.empty()) {
+        /* "audio-meta\t<title>\t<artist>\t<album>\t<device name>\t<device model>" */
+        pthread_mutex_lock(&client_device_name_mutex);
+        std::string fields[5] = { hls_ext_track_title, hls_ext_track_artist, hls_ext_track_album,
+                                  client_device_name, client_device_model };
+        pthread_mutex_unlock(&client_device_name_mutex);
+        std::string message = "audio-meta";
+        for (std::string &field : fields) {
+            std::replace(field.begin(), field.end(), '\t', ' ');
+            std::replace(field.begin(), field.end(), '\n', ' ');
+            std::replace(field.begin(), field.end(), '\r', ' ');
+            message += "\t" + field;
+        }
+        hls_ext_notify(message, true);
     }
     // Update video renderer with track metadata for cover art display
     if (render_coverart) {
@@ -3168,6 +3208,30 @@ static bool hls_ext_send(const std::string &message) {
     bool ok = hls_ext_active && hls_ext_send_locked(message);
     pthread_mutex_unlock(&hls_ext_mutex);
     return ok;
+}
+
+/* Audio session information for the external player.  Unlike HLS video messages these are
+ * sent whether or not an external video is active; connect_if_needed is false for frequent
+ * messages so that an absent player is not retried (and logged) every second. */
+static void hls_ext_notify(const std::string &message, bool connect_if_needed) {
+    if (hls_ext_socket_path.empty()) {
+        return;
+    }
+    pthread_mutex_lock(&hls_ext_mutex);
+    if (hls_ext_fd >= 0 || (connect_if_needed && hls_ext_connect_locked())) {
+        hls_ext_send_locked(message);
+    }
+    pthread_mutex_unlock(&hls_ext_mutex);
+}
+
+static void hls_ext_notify_audio_progress(uint32_t start, uint32_t curr, uint32_t end) {
+    if (hls_ext_socket_path.empty() || curr < start || curr > end) {
+        return;
+    }
+    char message[64];
+    snprintf(message, sizeof(message), "audio-progress %.3f %.3f",
+             (double) (curr - start) / 44100.0, (double) (end - start) / 44100.0);
+    hls_ext_notify(message, false);
 }
 
 /* returns true if the video was handed to the external player */
