@@ -116,6 +116,8 @@ struct raop_callbacks_s {
     int   (*video_set_codec)(void *cls, video_codec_t codec);
     /* for HLS video player controls */
     void  (*on_video_play) (void *cls, const char *location, const float start_position);
+    /* optional: client app (clientProcName) and device model of an AirPlay video /play */
+    void  (*on_video_client) (void *cls, const char *app, const char *model);
     void  (*on_video_scrub) (void *cls, const float position);
     void  (*on_video_rate) (void *cls, const float rate);
     void  (*on_video_stop) (void *cls);

@@ -734,6 +734,22 @@ http_handler_play(raop_conn_t *conn, http_request_t *request, http_response_t *r
 
     plist_from_bin(request_data, request_datalen, &req_root_node);
 
+    if (raop->callbacks.on_video_client) {
+        char *app = NULL;
+        char *model = NULL;
+        plist_t app_node = plist_dict_get_item(req_root_node, "clientProcName");
+        plist_t model_node = plist_dict_get_item(req_root_node, "model");
+        if (app_node && PLIST_IS_STRING(app_node)) {
+            plist_get_string_val(app_node, &app);
+        }
+        if (model_node && PLIST_IS_STRING(model_node)) {
+            plist_get_string_val(model_node, &model);
+        }
+        raop->callbacks.on_video_client(raop->callbacks.cls, app ? app : "", model ? model : "");
+        plist_mem_free(app);
+        plist_mem_free(model);
+    }
+
     plist_t req_uuid_node = plist_dict_get_item(req_root_node, "uuid");
     if (!req_uuid_node) {
        goto play_error;

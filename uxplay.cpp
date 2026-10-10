@@ -3025,6 +3025,8 @@ static double hls_ext_position = 0.0;
 static double hls_ext_duration = 0.0;
 static float hls_ext_rate = 0.0f;
 static std::string hls_ext_rx;
+static std::string hls_ext_client_app;     /* from the latest /play request */
+static std::string hls_ext_client_model;
 static guint hls_ext_watch_id = 0;
 static pthread_mutex_t hls_ext_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -3179,7 +3181,13 @@ static bool hls_ext_play(const char *location, float start_position) {
         hls_ext_position = start_position;
         hls_ext_duration = 0.0;
         hls_ext_rate = 0.0f;
-        ok = hls_ext_send_locked(std::string("play ") + start + " " + location);
+        /* "source <app> <model>" precedes "play"; words must not contain spaces */
+        std::string app = hls_ext_client_app.empty() ? "-" : hls_ext_client_app;
+        std::string model = hls_ext_client_model.empty() ? "-" : hls_ext_client_model;
+        std::replace(app.begin(), app.end(), ' ', '_');
+        std::replace(model.begin(), model.end(), ' ', '_');
+        ok = hls_ext_send_locked("source " + app + " " + model)
+             && hls_ext_send_locked(std::string("play ") + start + " " + location);
         if (!ok) {
             hls_ext_active = false;
             hls_ext_ended = false;
@@ -3194,6 +3202,13 @@ static bool hls_ext_is_active() {
     bool active = hls_ext_active;
     pthread_mutex_unlock(&hls_ext_mutex);
     return active;
+}
+
+extern "C" void on_video_client(void *cls, const char *app, const char *model) {
+    pthread_mutex_lock(&hls_ext_mutex);
+    hls_ext_client_app = app ? app : "";
+    hls_ext_client_model = model ? model : "";
+    pthread_mutex_unlock(&hls_ext_mutex);
 }
 
 extern "C" void on_video_play(void *cls, const char* location, const float start_position) {
@@ -3387,6 +3402,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3], 
     raop_cbs.on_video_scrub = on_video_scrub;
     raop_cbs.on_video_rate = on_video_rate;
     raop_cbs.get_custom_profile = get_custom_profile;
+    raop_cbs.on_video_client = on_video_client;
     raop_cbs.on_video_stop = on_video_stop;
     raop_cbs.on_video_playlist_remove = on_video_playlist_remove;
     raop_cbs.on_video_acquire_playback_info = on_video_acquire_playback_info;
