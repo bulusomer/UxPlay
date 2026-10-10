@@ -118,6 +118,11 @@ struct video_renderer_s {
 };
 
 static video_renderer_t *renderer = NULL;
+/* The global renderer is created/destroyed on the main loop thread but is also used from the
+   httpd thread (HLS /play, /rate, /scrub, /stop, /playback-info).  Serialize all such access so a
+   client request can never touch a renderer that is being destroyed or re-created. */
+static GRecMutex renderer_lock;
+#define RENDERER_LOCK() g_autoptr(GRecMutexLocker) renderer_locker = g_rec_mutex_locker_new(&renderer_lock)
 static video_renderer_t *renderer_type[NCODECS] = {0};
 static int n_renderers = NCODECS;
 static char h264[] = "h264";
@@ -280,6 +285,7 @@ g_string_replace (GString     *string,
 void video_renderer_init(logger_t *render_logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char * rtp_pipeline,
                           const char *decoder, const char *converter, const char *videosink, const char *videosink_options, 
                           bool initial_fullscreen, bool video_sync, bool h265_support, bool coverart_support, guint playbin_version, const char *uri) {
+    RENDERER_LOCK();
     GError *error = NULL;
     GstCaps *caps = NULL;
     bool rtp = (bool) strlen(rtp_pipeline);
@@ -518,6 +524,7 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
 }
 
 void video_renderer_pause() {
+    RENDERER_LOCK();
     if (!renderer) {
         return;
     }
@@ -526,6 +533,7 @@ void video_renderer_pause() {
 }
 
 void video_renderer_resume() {
+    RENDERER_LOCK();
     if (!renderer) {
         return;
     }
@@ -541,6 +549,7 @@ void video_renderer_resume() {
 }
 
 void video_renderer_start() {
+    RENDERER_LOCK();
     GstState state;
     const gchar *state_name = NULL;
     if (hls_video) {
@@ -706,6 +715,7 @@ void video_renderer_flush() {
 }
 
 void video_renderer_hls_ready() {
+    RENDERER_LOCK();
     GstState state;
     GstStateChangeReturn ret;
     if (renderer && hls_video) {
@@ -719,6 +729,7 @@ void video_renderer_hls_ready() {
 }
 
 void video_renderer_stop() {
+    RENDERER_LOCK();
     if (renderer) {
         logger_log(logger, LOGGER_DEBUG,"video_renderer_stop");
         if (renderer->appsrc) {
@@ -801,6 +812,7 @@ static void video_renderer_destroy_instance(video_renderer_t *renderer) {
 }
 
 void video_renderer_destroy() {
+    RENDERER_LOCK();
     for (int i = 0; i < n_renderers; i++) {
         if (renderer_type[i]) {
             video_renderer_destroy_instance(renderer_type[i]);
@@ -1136,6 +1148,7 @@ int video_renderer_choose_codec (bool video_is_jpeg, bool video_is_h265) {
     
 
 bool video_get_playback_info(double *duration, double *position, double *seek_start, double *seek_duration, float *rate, bool *buffer_empty, bool *buffer_full) {
+    RENDERER_LOCK();
     gint64 pos = 0;
     GstState state;
     *duration = 0.0;
@@ -1183,12 +1196,14 @@ bool video_get_playback_info(double *duration, double *position, double *seek_st
 }
 
 void video_renderer_set_start(float position) {
+    RENDERER_LOCK();
     hls_requested_start_position = (gint64) ((double) position * GST_SECOND);
     logger_log(logger, LOGGER_DEBUG, "register HLS video start position %f %lld", position,
                hls_requested_start_position);    
 }
 
 void video_renderer_seek(float position) {
+    RENDERER_LOCK();
      gint64 seek_position = (gint64) ((double) position * GST_SECOND);
     /* don't seek to within 1  microsecond  of beginning or end of video */
     if (!renderer || hls_duration < 2000) return;
@@ -1215,6 +1230,7 @@ unsigned int video_renderer_listen(void *loop, int id) {
 }
 
 bool video_renderer_eos_watch() {
+    RENDERER_LOCK();
     if (hls_video && renderer && renderer->eos) {
         renderer->eos = FALSE;
 	return true;
@@ -1223,6 +1239,7 @@ bool video_renderer_eos_watch() {
 }
 
 void video_renderer_hls_set_volume(double volume) {
+    RENDERER_LOCK();
     if (!renderer || strcmp(renderer->codec, hls)) {
        return;
     }
