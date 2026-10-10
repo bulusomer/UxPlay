@@ -1046,7 +1046,8 @@ static void print_info (char *name) {
     printf("-hlsext path Hand HLS/URL video to an external player listening on Unix\n");
     printf("             socket \"path\" instead of playing it (mirroring is unchanged)\n");
     printf("-hlsextlang [l] With -hlsext: keep all audio and subtitle languages, or only\n");
-    printf("             the original ones and those in list l (e.g. tr:en:de)\n");
+    printf("             the original ones and those in list l (e.g. tr:en:de;\n");
+    printf("             \"none\": only the original language)\n");
     printf("-custom s Restrict HLS resolutions by codec (useful on low-power hosts)\n");
     printf("-custom   Omit input \"profile string\" s to show its required format\n");
     printf("-rpi n    Set pre-selected HLS \"profile strings\" on R PI by model code n\n");
