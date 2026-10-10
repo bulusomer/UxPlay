@@ -215,6 +215,8 @@ static std::string mux_filename = "recording";
 static bool raspberry_pi_hls_support = false;
 static std::string custom_profile_string = "";
 static std::string hls_ext_socket_path = "";
+static std::string client_device_name = "";      /* name of the last client that connected */
+static pthread_mutex_t client_device_name_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 //Support for D-Bus-based screensaver inhibition (org.freedesktop.ScreenSaver) 
 static unsigned int scrsv = 0;
@@ -2689,6 +2691,9 @@ extern "C" void conn_reset (void *cls, int reason) {
 
 extern "C" void report_client_request(void *cls, char *deviceid, char * model, char *name, bool * admit) {
     LOGI("connection request from %s (%s) with deviceID = %s\n", name, model, deviceid);
+    pthread_mutex_lock(&client_device_name_mutex);
+    client_device_name = name ? name : "";
+    pthread_mutex_unlock(&client_device_name_mutex);
     if (restrict_clients) {
         *admit = check_client(deviceid);
         if (*admit == false) {
@@ -3181,12 +3186,18 @@ static bool hls_ext_play(const char *location, float start_position) {
         hls_ext_position = start_position;
         hls_ext_duration = 0.0;
         hls_ext_rate = 0.0f;
-        /* "source <app> <model>" precedes "play"; words must not contain spaces */
+        /* "source <app> <model> [<device name>]" precedes "play"; app and model must not
+         * contain spaces, the device name (e.g. "Ömer’s iPhone") is the rest of the line */
+        pthread_mutex_lock(&client_device_name_mutex);
+        std::string name = client_device_name;
+        pthread_mutex_unlock(&client_device_name_mutex);
+        std::replace(name.begin(), name.end(), '\n', ' ');
+        std::replace(name.begin(), name.end(), '\r', ' ');
         std::string app = hls_ext_client_app.empty() ? "-" : hls_ext_client_app;
         std::string model = hls_ext_client_model.empty() ? "-" : hls_ext_client_model;
         std::replace(app.begin(), app.end(), ' ', '_');
         std::replace(model.begin(), model.end(), ' ', '_');
-        ok = hls_ext_send_locked("source " + app + " " + model)
+        ok = hls_ext_send_locked("source " + app + " " + model + (name.empty() ? "" : " " + name))
              && hls_ext_send_locked(std::string("play ") + start + " " + location);
         if (!ok) {
             hls_ext_active = false;
