@@ -475,13 +475,14 @@ httpd_thread(void *arg)
                            "httpd closing dead connection on socket %d after timeout_limit = %d seconds of inactivity",
                             connection->socket_fd, timeout_limit);
                 httpd_remove_connection(httpd, connection, 0);
+                continue;
             }
             /* If not in the middle of request, allocate one */
             if (!connection->request) {
                 connection->request = http_request_init();
                 assert(connection->request);
                 if (connection->type == CONNECTION_TYPE_PTTH) {
-                    http_request_is_reverse(connection->request);
+                    http_request_set_reverse(connection->request);
                 }
                 logger_log(httpd->logger, LOGGER_DEBUG, "new request, connection %d, socket %d type %s",
                            i, connection->socket_fd, typename [connection->type]);
@@ -599,6 +600,9 @@ httpd_thread(void *arg)
                 httpd->callbacks.conn_request(connection->user_data, connection->request, &response);
                 http_request_destroy(connection->request);
                 connection->request = NULL;
+                /* next message on this connection must be checked for reverse-http again */
+                connection->staging_len = 0;
+                connection->staging[0] = '\0';
 
                 if (response) {
                     const char *data;
