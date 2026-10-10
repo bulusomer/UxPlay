@@ -213,6 +213,7 @@ static bool mux_to_file = false;
 static std::string mux_filename = "recording";
 static bool raspberry_pi_hls_support = false;
 static std::string custom_profile_string = "";
+static std::string hls_ext_socket_path = "";
 
 //Support for D-Bus-based screensaver inhibition (org.freedesktop.ScreenSaver) 
 static unsigned int scrsv = 0;
@@ -1029,6 +1030,8 @@ static void print_info (char *name) {
     printf("-lang ... Ranked HLS language preferences (\"fr:pt-BR:..\");\" \" = none\n");
     printf("-slang ...Ranked HLS subtitle language preferences (overrides -lang)\n");
     printf("-slang none  Do not show HLS subtitles\n");
+    printf("-hlsext path Hand HLS/URL video to an external player listening on Unix\n");
+    printf("             socket \"path\" instead of playing it (mirroring is unchanged)\n");
     printf("-custom s Restrict HLS resolutions by codec (useful on low-power hosts)\n");
     printf("-custom   Omit input \"profile string\" s to show its required format\n");
     printf("-rpi n    Set pre-selected HLS \"profile strings\" on R PI by model code n\n");
@@ -2125,6 +2128,13 @@ static void parse_arguments (int argc, char *argv[]) {
                 }
                 playbin_version = (guint) n;
             }
+        } else if (arg == "-hlsext") {
+            if (i >= argc - 1 || *argv[i+1] == '-') {
+                fprintf(stderr, "option \"-hlsext\" requires the path of a Unix socket\n");
+                exit(1);
+            }
+            hls_ext_socket_path = argv[++i];
+            hls_support = true;
         } else if (arg == "-lang") {
             lang_requested.erase();
             if (i < argc - 1 && *argv[i+1] != '-') {
@@ -2997,7 +3007,199 @@ extern "C" bool check_register(void *cls, const char *client_pk) {
 }
 /* control  callbacks for video player (unimplemented) */
 
+/* External HLS player bridge (-hlsext <unix socket path>).
+ *
+ * Instead of rendering AirPlay HLS/URL video with GStreamer, the video location is handed to an
+ * external player (e.g. a TV front-end with its own media player) over a Unix stream socket,
+ * together with the client's playback commands.  Line protocol, one message per line:
+ *   to player:   "play <start_seconds> <url>", "rate <0|1>", "scrub <seconds>", "stop"
+ *   from player: "status <position_seconds> <duration_seconds> <rate>", "ended"
+ * The player's status answers the client's /playback-info polling.  If the socket cannot be
+ * reached when a video starts, UxPlay falls back to playing the video itself. */
+static int hls_ext_fd = -1;
+static bool hls_ext_active = false;          /* current HLS/URL video is played externally */
+static bool hls_ext_status_valid = false;
+static bool hls_ext_ended = false;
+static double hls_ext_position = 0.0;
+static double hls_ext_duration = 0.0;
+static float hls_ext_rate = 0.0f;
+static std::string hls_ext_rx;
+static guint hls_ext_watch_id = 0;
+static pthread_mutex_t hls_ext_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void hls_ext_disconnect_locked() {
+    if (hls_ext_watch_id) {
+        g_source_remove(hls_ext_watch_id);
+        hls_ext_watch_id = 0;
+    }
+    if (hls_ext_fd >= 0) {
+        close(hls_ext_fd);
+        hls_ext_fd = -1;
+    }
+    hls_ext_rx.clear();
+    if (hls_ext_active) {
+        /* lost the player in the middle of a video: end the video for the client */
+        hls_ext_ended = true;
+    }
+}
+
+static void hls_ext_handle_line(const std::string &line) {
+    double position = 0.0, duration = 0.0, rate = 0.0;
+    if (sscanf(line.c_str(), "status %lf %lf %lf", &position, &duration, &rate) == 3) {
+        hls_ext_position = position;
+        hls_ext_duration = duration;
+        hls_ext_rate = (float) rate;
+        hls_ext_status_valid = true;
+    } else if (line == "ended") {
+        if (hls_ext_active) {
+            LOGI("hlsext: external player ended the video");
+            hls_ext_ended = true;
+        }
+    } else if (!line.empty()) {
+        LOGD("hlsext: ignoring unknown message \"%s\"", line.c_str());
+    }
+}
+
+#ifndef _WIN32
+static gboolean hls_ext_read_callback(gint fd, GIOCondition condition, gpointer data) {
+    (void) data;
+    pthread_mutex_lock(&hls_ext_mutex);
+    char buf[512];
+    ssize_t n = (condition & G_IO_IN) ? recv(fd, buf, sizeof(buf), 0) : 0;
+    if (n <= 0) {
+        LOGI("hlsext: external player disconnected");
+        hls_ext_watch_id = 0;          /* returning FALSE removes this source */
+        if (hls_ext_fd >= 0) {
+            close(hls_ext_fd);
+            hls_ext_fd = -1;
+        }
+        hls_ext_rx.clear();
+        if (hls_ext_active) {
+            hls_ext_ended = true;
+        }
+        pthread_mutex_unlock(&hls_ext_mutex);
+        return FALSE;
+    }
+    hls_ext_rx.append(buf, (size_t) n);
+    size_t eol;
+    while ((eol = hls_ext_rx.find('\n')) != std::string::npos) {
+        hls_ext_handle_line(hls_ext_rx.substr(0, eol));
+        hls_ext_rx.erase(0, eol + 1);
+    }
+    if (hls_ext_rx.size() > 4096) {
+        hls_ext_rx.clear();
+    }
+    pthread_mutex_unlock(&hls_ext_mutex);
+    return TRUE;
+}
+#endif
+
+/* call with hls_ext_mutex held */
+static bool hls_ext_connect_locked() {
+#ifdef _WIN32
+    return false;
+#else
+    if (hls_ext_fd >= 0) {
+        return true;
+    }
+    if (hls_ext_socket_path.empty()) {
+        return false;
+    }
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    if (hls_ext_socket_path.size() >= sizeof(addr.sun_path)) {
+        LOGE("hlsext: socket path too long: %s", hls_ext_socket_path.c_str());
+        return false;
+    }
+    strncpy(addr.sun_path, hls_ext_socket_path.c_str(), sizeof(addr.sun_path) - 1);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return false;
+    }
+    if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+        LOGI("hlsext: external player not reachable at %s; playing video in UxPlay",
+             hls_ext_socket_path.c_str());
+        close(fd);
+        return false;
+    }
+    hls_ext_fd = fd;
+    hls_ext_watch_id = g_unix_fd_add(fd, (GIOCondition) (G_IO_IN | G_IO_HUP | G_IO_ERR),
+                                     hls_ext_read_callback, NULL);
+    LOGI("hlsext: connected to external player at %s", hls_ext_socket_path.c_str());
+    return true;
+#endif
+}
+
+/* call with hls_ext_mutex held */
+static bool hls_ext_send_locked(const std::string &message) {
+    if (hls_ext_fd < 0) {
+        return false;
+    }
+    std::string line = message + "\n";
+    size_t sent = 0;
+    while (sent < line.size()) {
+#ifdef MSG_NOSIGNAL
+        ssize_t n = send(hls_ext_fd, line.c_str() + sent, line.size() - sent, MSG_NOSIGNAL);
+#else
+        ssize_t n = send(hls_ext_fd, line.c_str() + sent, line.size() - sent, 0);
+#endif
+        if (n <= 0) {
+            LOGE("hlsext: send to external player failed");
+            hls_ext_disconnect_locked();
+            return false;
+        }
+        sent += (size_t) n;
+    }
+    LOGD("hlsext: sent \"%s\"", message.c_str());
+    return true;
+}
+
+static bool hls_ext_send(const std::string &message) {
+    pthread_mutex_lock(&hls_ext_mutex);
+    bool ok = hls_ext_active && hls_ext_send_locked(message);
+    pthread_mutex_unlock(&hls_ext_mutex);
+    return ok;
+}
+
+/* returns true if the video was handed to the external player */
+static bool hls_ext_play(const char *location, float start_position) {
+    if (hls_ext_socket_path.empty()) {
+        return false;
+    }
+    pthread_mutex_lock(&hls_ext_mutex);
+    bool ok = hls_ext_connect_locked();
+    if (ok) {
+        char start[32];
+        snprintf(start, sizeof(start), "%.3f", start_position);
+        hls_ext_active = true;
+        hls_ext_ended = false;
+        hls_ext_status_valid = false;
+        hls_ext_position = start_position;
+        hls_ext_duration = 0.0;
+        hls_ext_rate = 0.0f;
+        ok = hls_ext_send_locked(std::string("play ") + start + " " + location);
+        if (!ok) {
+            hls_ext_active = false;
+            hls_ext_ended = false;
+        }
+    }
+    pthread_mutex_unlock(&hls_ext_mutex);
+    return ok;
+}
+
+static bool hls_ext_is_active() {
+    pthread_mutex_lock(&hls_ext_mutex);
+    bool active = hls_ext_active;
+    pthread_mutex_unlock(&hls_ext_mutex);
+    return active;
+}
+
 extern "C" void on_video_play(void *cls, const char* location, const float start_position) {
+    if (hls_ext_play(location, start_position)) {
+        LOGI("on_video_play: handed to external player: %s (start position %f)", location, start_position);
+        return;
+    }
     /* start_position needs to be implemented */
     video_renderer_set_start(start_position);
     url.erase();
@@ -3010,6 +3212,12 @@ extern "C" void on_video_play(void *cls, const char* location, const float start
 
 extern "C" void on_video_scrub(void *cls, const float position) {
     LOGI("on_video_scrub: position = %7.5f\n", position);
+    if (hls_ext_is_active()) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "scrub %.3f", position);
+        hls_ext_send(msg);
+        return;
+    }
     video_renderer_seek(position);
 }
 
@@ -3019,6 +3227,12 @@ extern "C" void get_custom_profile(void *cls, const char **custom_profile) {
 
 extern "C" void on_video_rate(void *cls, const float rate) {
     LOGI("on_video_rate = %7.5f\n", rate);
+    if (hls_ext_is_active()) {
+        if (rate == 1.0f || rate == 0.0f) {
+            hls_ext_send(rate == 1.0f ? "rate 1" : "rate 0");
+        }
+        return;
+    }
     if (rate == 1.0f) {
         video_renderer_resume();
     } else if (rate ==  0.0f) {
@@ -3035,6 +3249,13 @@ extern "C" float on_video_playlist_remove (void *cls) {
     float rate;
     bool buffer_empty, buffer_full;
     LOGI("************************* on_video_playlist_remove\n");
+    if (hls_ext_is_active()) {
+        hls_ext_send("rate 0");
+        pthread_mutex_lock(&hls_ext_mutex);
+        float ext_position = (float) hls_ext_position;
+        pthread_mutex_unlock(&hls_ext_mutex);
+        return ext_position;
+    }
     video_renderer_pause();
     video_get_playback_info(&duration, &position, &seek_start, &seek_end, &rate, &buffer_empty, &buffer_full);
     return (float) position;
@@ -3042,11 +3263,45 @@ extern "C" float on_video_playlist_remove (void *cls) {
 
  extern "C" void on_video_stop(void *cls) {
     LOGI("**************************on_video_stop\n");
+    if (hls_ext_is_active()) {
+        hls_ext_send("stop");
+        pthread_mutex_lock(&hls_ext_mutex);
+        hls_ext_active = false;
+        hls_ext_ended = false;
+        pthread_mutex_unlock(&hls_ext_mutex);
+        return;
+    }
     video_renderer_hls_ready();
  }
 
 extern "C" void on_video_acquire_playback_info (void *cls, playback_info_t *playback_info) {
     int buffering_level;
+    pthread_mutex_lock(&hls_ext_mutex);
+    if (hls_ext_active) {
+        if (hls_ext_ended) {
+            /* tells the client the video has finished (see http_handler_playback_info) */
+            playback_info->position = -1.0;
+            playback_info->duration = -1.0;
+            hls_ext_active = false;
+            hls_ext_ended = false;
+        } else if (!hls_ext_status_valid || hls_ext_duration <= 0.0) {
+            playback_info->position = -1.0;   /* "not available" until the player reports */
+            playback_info->duration = 0.0;
+        } else {
+            playback_info->duration = hls_ext_duration;
+            playback_info->position = hls_ext_position;
+            playback_info->seek_start = 0.0;
+            playback_info->seek_duration = hls_ext_duration;
+            playback_info->rate = hls_ext_rate;
+            playback_info->playback_buffer_empty = false;
+            playback_info->playback_buffer_full = true;
+            playback_info->ready_to_play = true;
+            playback_info->playback_likely_to_keep_up = true;
+        }
+        pthread_mutex_unlock(&hls_ext_mutex);
+        return;
+    }
+    pthread_mutex_unlock(&hls_ext_mutex);
     bool still_playing = video_get_playback_info(&playback_info->duration, &playback_info->position,
                                                  &playback_info->seek_start, &playback_info->seek_duration,
                                                  &playback_info->rate,
@@ -3162,6 +3417,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3], 
     if (audiodelay >= 0) raop_set_plist(raop, "audio_delay_micros", audiodelay);
     if (pin_pw == 1) raop_set_plist(raop, "pin", (int) pin);
     if (hls_support) raop_set_plist(raop, "hls", 1);
+    if (!hls_ext_socket_path.empty()) raop_set_plist(raop, "hls_single_variant", 1);
 
     /* network port selection (ports listed as "0" will be dynamically assigned) */
     raop_set_tcp_ports(raop, tcp);
