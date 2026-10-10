@@ -1462,6 +1462,17 @@ char *adjust_yt_condensed_playlist(const char *media_playlist, int n_chunks) {
     /* only PREFIX="s/" (strlen = 2) has been seen */ 
     new_len += n_chunks * (base_uri_len + params_len + 2 - prefix_len);
 
+    /* YouTube generates each media segment as an independent MPEG-TS file whose PAT/PMT and
+       continuity counters do not continue those of the previous segment.  GStreamer's tsdemux
+       treats the counter mismatch at a segment start as packet loss and drops that packet,
+       which is the start of the segment's IDR frame: every following frame of the segment is
+       then decoded from missing references (macroblocking/smearing).  Marking every segment
+       boundary as a discontinuity makes hlsdemux2 flag each segment DISCONT, so tsdemux
+       resets its continuity state instead of dropping the keyframe. */
+    const char discontinuity[] = "#EXT-X-DISCONTINUITY\n";
+    const size_t discontinuity_len = strlen(discontinuity);
+    new_len += (n_chunks - 1) * discontinuity_len;
+
     char *prefix = malloc(prefix_len + 1);  // must free
     prefix[prefix_len] = '\0';
     memcpy(prefix, prefix_begin, prefix_len);
@@ -1486,6 +1497,10 @@ char *adjust_yt_condensed_playlist(const char *media_playlist, int n_chunks) {
     while (count < n_chunks) {
         count++;
         /* for each chunk */
+        if (count > 1) {
+            memcpy(new_pos, discontinuity, discontinuity_len);
+            new_pos += discontinuity_len;
+        }
         const char *start = strstr(old_pos, prefix);
         assert(start);
         len = start - old_pos;
