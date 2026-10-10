@@ -622,7 +622,9 @@ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t 
                 }
             }
             if (raop->hls_single_variant) {
-                if (!reduce_master_playlist_to_one_variant(&playlist, raop->logger)) {
+                if (!reduce_master_playlist_to_one_variant(&playlist,
+                                                           raop->hls_all_languages ? raop->hls_languages : NULL,
+                                                           raop->logger)) {
                     logger_log(raop->logger, LOGGER_ERR, "failed to reduce master playlist to one variant");
                 }
             }

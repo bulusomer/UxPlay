@@ -89,6 +89,7 @@ struct raop_s {
     bool hls_support;
     bool hls_single_variant;   /* hand a single HLS variant to an external player */
     bool hls_all_languages;    /* keep every audio/subtitle language for the external player */
+    char *hls_languages;       /* ... or only these (':'-separated) plus the original */
     bool hls_pending;
   
     /* used in digest authentication */
@@ -713,6 +714,9 @@ raop_destroy(raop_t *raop) {
         if (raop->random_pw) {
             free(raop->random_pw);
         }
+        if (raop->hls_languages) {
+            free(raop->hls_languages);
+        }
 
         free(raop);
 
@@ -733,6 +737,16 @@ raop_set_log_level(raop_t *raop, int level) {
     assert(raop);
 
     logger_set_level(raop->logger, level);
+}
+
+void raop_set_hls_languages(raop_t *raop, const char *languages) {
+    if (raop->hls_languages) {
+        free(raop->hls_languages);
+        raop->hls_languages = NULL;
+    }
+    if (languages && *languages) {
+        raop->hls_languages = strdup(languages);
+    }
 }
 
 int raop_set_plist(raop_t *raop, const char *plist_item, const int value) {

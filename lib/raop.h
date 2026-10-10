@@ -134,7 +134,12 @@ raop_ntp_t *raop_ntp_init(logger_t *logger, raop_callbacks_t *callbacks, const c
 airplay_video_t *airplay_video_init(raop_t *raop, unsigned short port,
                                     const char *lang, const char *lang_subtitles, const char* lang_system);
 bool filter_master_playlist(char **master_playlist, const char *custom_profile, logger_t *logger);
-bool reduce_master_playlist_to_one_variant(char **master_playlist, logger_t *logger);
+/* languages: NULL/"" keeps every AUDIO/SUBTITLES rendition of the chosen variant; otherwise a
+ * ':'-separated list of language codes ("tr:en:de") - only renditions in those languages and
+ * the DEFAULT (original) ones are kept. */
+bool reduce_master_playlist_to_one_variant(char **master_playlist, const char *languages,
+                                           logger_t *logger);
+RAOP_API void raop_set_hls_languages(raop_t *raop, const char *languages);
 char *adjust_master_playlist (char *fcup_response_data, int fcup_response_datalen,
                               const char *uri_prefix, char *uri_local_prefix);
 uint64_t get_local_time();

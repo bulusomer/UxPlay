@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <assert.h>
 
@@ -1139,7 +1140,27 @@ bool filter_master_playlist(char **master_playlist_ptr, const char * custom_prof
  * handed to an external player (-hlsext): players such as libmpv/ffmpeg do not switch variants
  * adaptively but open and probe every variant and rendition before starting, which made startup
  * take 10+ seconds with YouTube's ~20 renditions. */
-bool reduce_master_playlist_to_one_variant(char **master_playlist_ptr, logger_t *logger) {
+/* true if the rendition's LANGUAGE (primary subtag, e.g. "de" of "de-DE") is in the
+ * ':'-separated list, if it has no LANGUAGE, or if it is the DEFAULT (original) one */
+static bool rendition_language_wanted(const char *line, const char *languages) {
+    char language[32] = {0}, is_default[8] = {0};
+    get_attr_value(line, "DEFAULT=", is_default, sizeof(is_default));
+    if (!strcmp(is_default, "YES")) return true;
+    if (!get_attr_value(line, "LANGUAGE=", language, sizeof(language)) || !language[0]) return true;
+    char *dash = strchr(language, '-');
+    if (dash) *dash = '\0';
+    size_t len = strlen(language);
+    for (const char *p = languages; p && *p; ) {
+        const char *end = strchr(p, ':');
+        size_t item = end ? (size_t) (end - p) : strlen(p);
+        if (item == len && !strncasecmp(p, language, len)) return true;
+        p = end ? end + 1 : NULL;
+    }
+    return false;
+}
+
+bool reduce_master_playlist_to_one_variant(char **master_playlist_ptr, const char *languages,
+                                           logger_t *logger) {
     const char *orig = *master_playlist_ptr;
     size_t orig_len = strlen(orig);
 
@@ -1220,6 +1241,10 @@ bool reduce_master_playlist_to_one_variant(char **master_playlist_ptr, logger_t 
                 keep = audio_group[0] && !strcmp(group, audio_group);
             } else if (!strcmp(type, "SUBTITLES")) {
                 keep = subtitles_group[0] && !strcmp(group, subtitles_group);
+            }
+            if (keep && languages && *languages
+                && (!strcmp(type, "AUDIO") || !strcmp(type, "SUBTITLES"))) {
+                keep = rendition_language_wanted(line, languages);
             }
         }
         if (keep && (line[0] || i + 1 < count)) {
