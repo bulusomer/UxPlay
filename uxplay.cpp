@@ -3007,6 +3007,10 @@ extern "C" void on_video_scrub(void *cls, const float position) {
     video_renderer_seek(position);
 }
 
+extern "C" void get_custom_profile(void *cls, const char **custom_profile) {
+    *custom_profile = custom_profile_string.empty() ? NULL : custom_profile_string.c_str();
+}
+
 extern "C" void on_video_rate(void *cls, const float rate) {
     LOGI("on_video_rate = %7.5f\n", rate);
     if (rate == 1.0f) {
@@ -3120,6 +3124,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3], 
     raop_cbs.on_video_play = on_video_play;
     raop_cbs.on_video_scrub = on_video_scrub;
     raop_cbs.on_video_rate = on_video_rate;
+    raop_cbs.get_custom_profile = get_custom_profile;
     raop_cbs.on_video_stop = on_video_stop;
     raop_cbs.on_video_playlist_remove = on_video_playlist_remove;
     raop_cbs.on_video_acquire_playback_info = on_video_acquire_playback_info;
