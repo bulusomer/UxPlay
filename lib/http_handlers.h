@@ -321,6 +321,12 @@ http_handler_playback_info(raop_conn_t *conn, http_request_t *request, http_resp
     //ayback_info.ready_to_play = true; // ???;
     //ayback_info.playback_likely_to_keep_up = true;
 
+    /* HLS clients poll /playback-info about once a second; this is proof the client is
+       still online even when there is no RAOP connection sending POST /feedback */
+    if (raop->callbacks.conn_feedback) {
+        raop->callbacks.conn_feedback(raop->callbacks.cls);
+    }
+
     raop->callbacks.on_video_acquire_playback_info(raop->callbacks.cls, &playback_info);
     if (playback_info.duration == -1.0) {
         /* video has finished, reset */
