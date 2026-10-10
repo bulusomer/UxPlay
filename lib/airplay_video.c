@@ -1134,6 +1134,106 @@ bool filter_master_playlist(char **master_playlist_ptr, const char * custom_prof
     return true;
 }
 
+/* Reduce a master playlist to a single video variant (preferring the highest-bandwidth AVC/H.264
+ * variant) plus only the audio/subtitle renditions that variant references.  Used when the video is
+ * handed to an external player (-hlsext): players such as libmpv/ffmpeg do not switch variants
+ * adaptively but open and probe every variant and rendition before starting, which made startup
+ * take 10+ seconds with YouTube's ~20 renditions. */
+bool reduce_master_playlist_to_one_variant(char **master_playlist_ptr, logger_t *logger) {
+    const char *orig = *master_playlist_ptr;
+    size_t orig_len = strlen(orig);
+
+    /* split into lines (copies) */
+    int n_lines = 0;
+    for (const char *c = orig; *c; c++) {
+        if (*c == '\n') n_lines++;
+    }
+    n_lines++;
+    char **lines = (char **) calloc(n_lines, sizeof(char *));
+    if (!lines) {
+        return false;
+    }
+    int count = 0;
+    const char *start = orig;
+    while (*start && count < n_lines) {
+        const char *end = strchr(start, '\n');
+        size_t len = end ? (size_t) (end - start) : strlen(start);
+        if (len > 0 && start[len - 1] == '\r') len--;
+        lines[count] = (char *) malloc(len + 1);
+        memcpy(lines[count], start, len);
+        lines[count][len] = '\0';
+        count++;
+        if (!end) break;
+        start = end + 1;
+    }
+
+    /* choose the variant */
+    int best = -1;
+    bool best_is_avc = false;
+    long best_bandwidth = -1;
+    char value[64];
+    for (int i = 0; i + 1 < count; i++) {
+        if (strncmp(lines[i], "#EXT-X-STREAM-INF:", strlen("#EXT-X-STREAM-INF:"))) {
+            continue;
+        }
+        long bandwidth = 0;
+        if (get_attr_value(lines[i], "BANDWIDTH=", value, sizeof(value))) {
+            bandwidth = strtol(value, NULL, 10);
+        }
+        bool is_avc = get_attr_value(lines[i], "CODECS=", value, sizeof(value))
+            && strstr(value, "avc1") != NULL;
+        if (best < 0 || (is_avc && !best_is_avc)
+            || (is_avc == best_is_avc && bandwidth > best_bandwidth)) {
+            best = i;
+            best_is_avc = is_avc;
+            best_bandwidth = bandwidth;
+        }
+    }
+    if (best < 0) {
+        for (int i = 0; i < count; i++) free(lines[i]);
+        free(lines);
+        return false;
+    }
+    char audio_group[64] = {0};
+    char subtitles_group[64] = {0};
+    get_attr_value(lines[best], "AUDIO=", audio_group, sizeof(audio_group));
+    get_attr_value(lines[best], "SUBTITLES=", subtitles_group, sizeof(subtitles_group));
+
+    char *reduced = (char *) calloc(orig_len + 2, 1);
+    if (!reduced) {
+        for (int i = 0; i < count; i++) free(lines[i]);
+        free(lines);
+        return false;
+    }
+    char *out = reduced;
+    for (int i = 0; i < count; i++) {
+        const char *line = lines[i];
+        bool keep = true;
+        if (!strncmp(line, "#EXT-X-STREAM-INF:", strlen("#EXT-X-STREAM-INF:"))) {
+            keep = (i == best);
+            if (!keep) i++;   /* also drop the variant's URI line */
+        } else if (!strncmp(line, "#EXT-X-MEDIA:", strlen("#EXT-X-MEDIA:"))) {
+            char type[32] = {0}, group[64] = {0};
+            get_attr_value(line, "TYPE=", type, sizeof(type));
+            get_attr_value(line, "GROUP-ID=", group, sizeof(group));
+            if (!strcmp(type, "AUDIO")) {
+                keep = audio_group[0] && !strcmp(group, audio_group);
+            } else if (!strcmp(type, "SUBTITLES")) {
+                keep = subtitles_group[0] && !strcmp(group, subtitles_group);
+            }
+        }
+        if (keep && (line[0] || i + 1 < count)) {
+            out += sprintf(out, "%s\n", line);
+        }
+    }
+    logger_log(logger, LOGGER_INFO, "hlsext: master playlist reduced to one variant: %s", lines[best]);
+    for (int i = 0; i < count; i++) free(lines[i]);
+    free(lines);
+    free(*master_playlist_ptr);
+    *master_playlist_ptr = reduced;
+    return true;
+}
+
 static int parse_media_playlist(media_item_t *media_item) {
     const char *ptr = media_item->playlist;
     char extm3u[] = "#EXTM3U";

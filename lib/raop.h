@@ -132,6 +132,7 @@ raop_ntp_t *raop_ntp_init(logger_t *logger, raop_callbacks_t *callbacks, const c
 airplay_video_t *airplay_video_init(raop_t *raop, unsigned short port,
                                     const char *lang, const char *lang_subtitles, const char* lang_system);
 bool filter_master_playlist(char **master_playlist, const char *custom_profile, logger_t *logger);
+bool reduce_master_playlist_to_one_variant(char **master_playlist, logger_t *logger);
 char *adjust_master_playlist (char *fcup_response_data, int fcup_response_datalen,
                               const char *uri_prefix, char *uri_local_prefix);
 uint64_t get_local_time();

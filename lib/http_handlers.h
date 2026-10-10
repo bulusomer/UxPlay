@@ -621,6 +621,11 @@ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t 
                     logger_log(raop->logger, LOGGER_ERR, "failed to filter master playlist");
                 }
             }
+            if (raop->hls_single_variant) {
+                if (!reduce_master_playlist_to_one_variant(&playlist, raop->logger)) {
+                    logger_log(raop->logger, LOGGER_ERR, "failed to reduce master playlist to one variant");
+                }
+            }
 
             const char *uri_prefix = get_uri_prefix(airplay_video);
             char ** uri_list = NULL;

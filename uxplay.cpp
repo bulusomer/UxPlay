@@ -50,6 +50,7 @@
 #include <glib-unix.h>
 #include <sys/utsname.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <ifaddrs.h>
 #include <sys/types.h>
 #include <pwd.h>
