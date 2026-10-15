@@ -3964,6 +3964,8 @@ int main (int argc, char *argv[]) {
     if (use_audio) {
         audio_renderer_init(render_logger, audiosink.c_str(), &audio_sync, &video_sync, audio_rtp_pipeline.c_str());
         audio_renderer_set_level_callback(hls_ext_audio_level);
+        /* the external player learns at once that the audio's sound is reported */
+        hls_ext_notify("features audio-level", true);
     } else {
         LOGI("audio_disabled");
     }
