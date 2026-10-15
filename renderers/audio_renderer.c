@@ -30,6 +30,7 @@
 
 static GstClockTime gst_audio_pipeline_base_time = GST_CLOCK_TIME_NONE;
 static logger_t *logger = NULL;
+static void (*level_callback)(bool sounding) = NULL;
 const char * format[NFORMATS];
 
 static const gchar *avdec_aac = "avdec_aac";
@@ -427,9 +428,23 @@ static gboolean gstreamer_audio_pipeline_bus_callback(GstBus *bus, GstMessage *m
     case GST_MESSAGE_EOS:
         logger_log(logger, LOGGER_INFO, "GStreamer: End-Of-Stream (audio)");
         break;
-    case GST_MESSAGE_ELEMENT:
-      // many "level" messages may be sent
+    case GST_MESSAGE_ELEMENT: {
+        /* many "level" messages (every 100 ms): reported as sound / silence */
+        const GstStructure *structure = gst_message_get_structure(message);
+        if (level_callback && structure && gst_structure_has_name(structure, "level")) {
+            const GValue *peaks = gst_structure_get_value(structure, "peak");
+            gdouble loudest = -G_MAXDOUBLE;
+            G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+            GValueArray *array = peaks ? (GValueArray *) g_value_get_boxed(peaks) : NULL;
+            for (guint i = 0; array && i < array->n_values; i++) {
+                gdouble peak = g_value_get_double(g_value_array_get_nth(array, i));
+                if (peak > loudest) loudest = peak;
+            }
+            G_GNUC_END_IGNORE_DEPRECATIONS
+            level_callback(loudest > -70.0);
+        }
         break;
+    }
     default:
         /* unhandled message */
         logger_log(logger, LOGGER_DEBUG,"GStreamer unhandled audio bus message: src = %s type = %s",
@@ -437,6 +452,10 @@ static gboolean gstreamer_audio_pipeline_bus_callback(GstBus *bus, GstMessage *m
         break;
     }
     return TRUE;
+}
+
+void audio_renderer_set_level_callback(void (*callback)(bool sounding)) {
+    level_callback = callback;
 }
 
 unsigned int audio_renderer_listen(void *loop, int id) {

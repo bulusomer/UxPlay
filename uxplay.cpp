@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <string>
+#include <atomic>
 #include <algorithm>
 #include <vector>
 #include <array>
@@ -225,6 +226,11 @@ static std::string client_device_name = "";      /* name of the last client that
 static std::string client_device_model = "";
 static pthread_mutex_t client_device_name_mutex = PTHREAD_MUTEX_INITIALIZER;
 static void hls_ext_notify(const std::string &message, bool connect_if_needed);
+/* Whether the audio has sound, for the external player ("audio-level 1" / "audio-level 0"): a
+ * phone may open an audio stream that only carries silence (an app keeping its audio session alive),
+ * which is not music. Sent when it changes; -1 = unknown (a new stream, or after a flush). */
+static std::atomic<int> hls_ext_audio_sounding{-1};
+
 static void hls_ext_notify_audio_progress(uint32_t start, uint32_t curr, uint32_t end);
 
 //Support for D-Bus-based screensaver inhibition (org.freedesktop.ScreenSaver) 
@@ -2822,6 +2828,7 @@ extern "C" void video_resume (void *cls) {
 
 extern "C" void audio_flush (void *cls) {
     if (use_audio) {
+        hls_ext_audio_sounding = -1;
         audio_renderer_flush();
     }
 }
@@ -2907,6 +2914,7 @@ extern "C" void audio_get_format (void *cls, unsigned char *ct, unsigned short *
     audio_type = type;
     
     if (use_audio) {
+      hls_ext_audio_sounding = -1;
       audio_renderer_start(ct);
     }
 
@@ -3234,6 +3242,13 @@ static void hls_ext_notify(const std::string &message, bool connect_if_needed) {
         hls_ext_send_locked(message);
     }
     pthread_mutex_unlock(&hls_ext_mutex);
+}
+
+static void hls_ext_audio_level(bool sounding) {
+    if (hls_ext_audio_sounding.exchange((int) sounding) == (int) sounding) {
+        return;
+    }
+    hls_ext_notify(sounding ? "audio-level 1" : "audio-level 0", true);
 }
 
 static void hls_ext_notify_audio_progress(uint32_t start, uint32_t curr, uint32_t end) {
@@ -3948,6 +3963,7 @@ int main (int argc, char *argv[]) {
 
     if (use_audio) {
         audio_renderer_init(render_logger, audiosink.c_str(), &audio_sync, &video_sync, audio_rtp_pipeline.c_str());
+        audio_renderer_set_level_callback(hls_ext_audio_level);
     } else {
         LOGI("audio_disabled");
     }

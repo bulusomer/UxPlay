@@ -41,6 +41,9 @@ void audio_renderer_set_volume(double volume);
 void audio_renderer_flush();
 void audio_renderer_destroy();
 unsigned int audio_renderer_listen(void *loop, int id);
+/* Called from the audio bus with every "level" message: whether the audio being played has sound
+ * (peak above about -70 dBFS) or is silent. */
+void audio_renderer_set_level_callback(void (*callback)(bool sounding));
 #ifdef __cplusplus
 }
 #endif
