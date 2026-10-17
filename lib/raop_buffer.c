@@ -174,6 +174,27 @@ raop_buffer_enqueue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned sh
     }
     /* before time is synchronized, some empty data packets are sent */
     if (datalen == 12 || (datalen == 16 && !memcmp(&data[12], empty_packet_marker, 4))) {
+        /* Later, an empty packet holds a place in the sequence (the phone sends them when its   *
+         * sound pauses, and resends them so when asked): it is kept as an empty entry, skipped  *
+         * by dequeue. Dropped, it left a hole the buffer waited for until it was full (256      *
+         * packets, 2.6 s): the start of every new sound came too late to be played.             */
+        if (use_seqnum && !raop_buffer->is_empty) {
+            unsigned short empty_seqnum = byteutils_get_short_be(data, 2);
+            if (seqnum_cmp(empty_seqnum, raop_buffer->first_seqnum) >= 0 &&
+                seqnum_cmp(empty_seqnum, raop_buffer->first_seqnum + RAOP_BUFFER_LENGTH) < 0) {
+                raop_buffer_entry_t *empty_entry = &raop_buffer->entries[empty_seqnum % RAOP_BUFFER_LENGTH];
+                if (!empty_entry->filled) {
+                    empty_entry->seqnum = empty_seqnum;
+                    empty_entry->rtp_timestamp = byteutils_get_int_be(data, 4);
+                    empty_entry->filled = 1;
+                    empty_entry->payload_data = NULL;
+                    empty_entry->payload_size = 0;
+                    if (seqnum_cmp(empty_seqnum, raop_buffer->last_seqnum) > 0) {
+                        raop_buffer->last_seqnum = empty_seqnum;
+                    }
+                }
+            }
+        }
         return 0;
     }
     int payload_size = datalen - 12;
@@ -255,6 +276,10 @@ raop_buffer_dequeue(raop_buffer_t *raop_buffer, unsigned int *length, uint32_t *
         return NULL;
     }
     entry->filled = 0;
+    if (!entry->payload_data) {
+        /* an empty packet's place: nothing to play, the next entry follows */
+        return raop_buffer_dequeue(raop_buffer, length, rtp_timestamp, seqnum, no_resend);
+    }
 
     /* Return entry payload buffer */
     *rtp_timestamp = entry->rtp_timestamp;
