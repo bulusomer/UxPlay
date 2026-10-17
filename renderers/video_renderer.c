@@ -407,6 +407,10 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 } else {
                     g_string_append(launch, "rtph264pay ");
                     g_string_append(launch, rtp_pipeline);
+                    /* -vrtp: the frames keep their presentation times (with -vsync), so that a   *
+                     * udpsink sync=true sends each one when it is due, in step with the audio    *
+                     * sink, which -vsync also syncs; without them the audio could not be matched */
+                    sync = video_sync;
                 }
             }
             if (!rtp || jpeg_pipeline) {
