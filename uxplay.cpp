@@ -3101,7 +3101,11 @@ static void hls_ext_disconnect_locked() {
         hls_ext_watch_id = 0;
     }
     if (hls_ext_fd >= 0) {
+#ifdef _WIN32
+        closesocket((SOCKET) hls_ext_fd);   /* its reader thread sees the socket go and ends */
+#else
         close(hls_ext_fd);
+#endif
         hls_ext_fd = -1;
     }
     hls_ext_rx.clear();
@@ -3110,6 +3114,8 @@ static void hls_ext_disconnect_locked() {
         hls_ext_ended = true;
     }
 }
+
+static void hls_ext_consume_locked(const char *buf, size_t n);
 
 static void hls_ext_handle_line(const std::string &line) {
     double position = 0.0, duration = 0.0, rate = 0.0;
@@ -3148,7 +3154,15 @@ static gboolean hls_ext_read_callback(gint fd, GIOCondition condition, gpointer 
         pthread_mutex_unlock(&hls_ext_mutex);
         return FALSE;
     }
-    hls_ext_rx.append(buf, (size_t) n);
+    hls_ext_consume_locked(buf, (size_t) n);
+    pthread_mutex_unlock(&hls_ext_mutex);
+    return TRUE;
+}
+#endif
+
+/* call with hls_ext_mutex held */
+static void hls_ext_consume_locked(const char *buf, size_t n) {
+    hls_ext_rx.append(buf, n);
     size_t eol;
     while ((eol = hls_ext_rx.find('\n')) != std::string::npos) {
         hls_ext_handle_line(hls_ext_rx.substr(0, eol));
@@ -3157,15 +3171,98 @@ static gboolean hls_ext_read_callback(gint fd, GIOCondition condition, gpointer 
     if (hls_ext_rx.size() > 4096) {
         hls_ext_rx.clear();
     }
-    pthread_mutex_unlock(&hls_ext_mutex);
-    return TRUE;
+}
+
+#ifdef _WIN32
+/* Windows has no Unix socket for GLib to watch: the player listens on a loopback TCP port and
+ * writes its number into the file at the -hlsext path (so the path, and the cover art next to
+ * it, stay as on Linux).  A thread per connection reads the player's messages. */
+static unsigned int hls_ext_generation = 0;
+
+struct hls_ext_reader_arg {
+    SOCKET fd;
+    unsigned int generation;
+};
+
+static void *hls_ext_reader_thread(void *data) {
+    hls_ext_reader_arg arg = *(hls_ext_reader_arg *) data;
+    free(data);
+    char buf[512];
+    for (;;) {
+        int n = recv(arg.fd, buf, sizeof(buf), 0);
+        pthread_mutex_lock(&hls_ext_mutex);
+        /* hls_ext_disconnect_locked() may have closed this socket and a new one may be open */
+        const bool current = arg.generation == hls_ext_generation && hls_ext_fd >= 0;
+        if (n <= 0) {
+            if (current) {
+                LOGI("hlsext: external player disconnected");
+                closesocket(arg.fd);
+                hls_ext_fd = -1;
+                hls_ext_rx.clear();
+                if (hls_ext_active) {
+                    hls_ext_ended = true;
+                }
+            }
+            pthread_mutex_unlock(&hls_ext_mutex);
+            return NULL;
+        }
+        if (current) {
+            hls_ext_consume_locked(buf, (size_t) n);
+        }
+        pthread_mutex_unlock(&hls_ext_mutex);
+    }
 }
 #endif
 
 /* call with hls_ext_mutex held */
 static bool hls_ext_connect_locked() {
 #ifdef _WIN32
-    return false;
+    if (hls_ext_fd >= 0) {
+        return true;
+    }
+    if (hls_ext_socket_path.empty()) {
+        return false;
+    }
+    int port = 0;
+    {
+        std::ifstream portfile(hls_ext_socket_path);
+        portfile >> port;
+    }
+    if (port <= 0 || port > 65535) {
+        LOGI("hlsext: external player not reachable at %s; playing video in UxPlay",
+             hls_ext_socket_path.c_str());
+        return false;
+    }
+    SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd == INVALID_SOCKET) {
+        return false;
+    }
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((u_short) port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0) {
+        LOGI("hlsext: external player not reachable at %s (port %d); playing video in UxPlay",
+             hls_ext_socket_path.c_str(), port);
+        closesocket(fd);
+        return false;
+    }
+    hls_ext_reader_arg *arg = (hls_ext_reader_arg *) malloc(sizeof(hls_ext_reader_arg));
+    pthread_t reader;
+    if (arg) {
+        arg->fd = fd;
+        arg->generation = ++hls_ext_generation;
+    }
+    if (!arg || pthread_create(&reader, NULL, hls_ext_reader_thread, arg) != 0) {
+        free(arg);
+        closesocket(fd);
+        return false;
+    }
+    pthread_detach(reader);
+    hls_ext_fd = (int) fd;
+    LOGI("hlsext: connected to external player at %s (port %d)", hls_ext_socket_path.c_str(), port);
+    return true;
 #else
     if (hls_ext_fd >= 0) {
         return true;
@@ -3772,9 +3869,9 @@ int main (int argc, char *argv[]) {
 
 #ifdef _WIN32    /*  use utf-8 terminal output; don't buffer stdout in WIN32 when debug_log = false */
     SetConsoleOutputCP(CP_UTF8);
-    if (!debug_log) {
-        setbuf(stdout, NULL);
-    }
+    /* unbuffered with -d too: a program reading UxPlay's output through a pipe (Windows has no
+     * stdbuf) must see each line when it is written */
+    setbuf(stdout, NULL);
 #endif
 
     LOGI("UxPlay %s: An Open-Source AirPlay mirroring and audio-streaming server.", VERSION);
